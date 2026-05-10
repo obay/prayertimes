@@ -1,0 +1,82 @@
+name: Update Prayer Times
+
+on:
+  schedule:
+    # 1st of every month at 12:00 UTC (~04:00 PT). Populates current + next month.
+    - cron: "0 12 1 * *"
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "Year (default: current month, also runs next month)"
+        required: false
+      month:
+        description: "Month (default: current month, also runs next month)"
+        required: false
+      address:
+        description: 'Override default home address (e.g. "Mecca, Saudi Arabia")'
+        required: false
+      tz:
+        description: "IANA TZ for the override address (e.g. Asia/Riyadh)"
+        required: false
+      dry_run:
+        description: "Print what would be done without writing"
+        type: boolean
+        default: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Build argument list
+        id: args
+        run: |
+          set -euo pipefail
+          ARGS=""
+          if [ -n "${{ inputs.address || '' }}" ]; then
+            ARGS="$ARGS --address '${{ inputs.address }}'"
+          fi
+          if [ -n "${{ inputs.tz || '' }}" ]; then
+            ARGS="$ARGS --tz '${{ inputs.tz }}'"
+          fi
+          if [ "${{ inputs.dry_run || 'false' }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          echo "extra=$ARGS" >> "$GITHUB_OUTPUT"
+
+      - name: Run for explicit year/month
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.year != '' || inputs.month != '') }}
+        run: |
+          set -euo pipefail
+          Y="${{ inputs.year }}"
+          M="${{ inputs.month }}"
+          [ -z "$Y" ] && Y=$(date -u +%Y)
+          [ -z "$M" ] && M=$(date -u +%-m)
+          eval python prayertimes.py --year "$Y" --month "$M" ${{ steps.args.outputs.extra }}
+
+      - name: Run for current and next month
+        if: ${{ github.event_name != 'workflow_dispatch' || (inputs.year == '' && inputs.month == '') }}
+        run: |
+          set -euo pipefail
+          CUR_Y=$(date -u +%Y)
+          CUR_M=$(date -u +%-m)
+          NEXT_Y=$(date -u -d "$(date -u +%Y-%m-01) +1 month" +%Y)
+          NEXT_M=$(date -u -d "$(date -u +%Y-%m-01) +1 month" +%-m)
+          echo "::group::Current month $CUR_Y-$CUR_M"
+          eval python prayertimes.py --year "$CUR_Y" --month "$CUR_M" ${{ steps.args.outputs.extra }}
+          echo "::endgroup::"
+          echo "::group::Next month $NEXT_Y-$NEXT_M"
+          eval python prayertimes.py --year "$NEXT_Y" --month "$NEXT_M" ${{ steps.args.outputs.extra }}
+          echo "::endgroup::"

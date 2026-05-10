@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+PrayerTimes-*.csv
+client_secret_*.json
+credentials.json
