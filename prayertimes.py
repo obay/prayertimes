@@ -12,11 +12,13 @@ reinserts a fresh set so it stays correct as travel plans change.
 import argparse
 import calendar
 import os
+import random
 import re
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Iterable
+from typing import Callable, Iterable, TypeVar
 from zoneinfo import ZoneInfo
 
 import airportsdata
@@ -192,6 +194,34 @@ def get_calendar_service(refresh_token: str, client_id: str, client_secret: str)
 
 def _to_rfc3339(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_T = TypeVar("_T")
+_RETRYABLE_STATUSES = {403, 429, 500, 502, 503, 504}
+
+
+def _execute_with_retry(call: Callable[[], _T], *, max_retries: int = 7) -> _T:
+    """Execute a Google API request with exponential backoff on transient errors.
+
+    New Google Cloud projects ship with conservative per-second write quotas;
+    inserting/deleting hundreds of events back-to-back trips them. We retry
+    rateLimitExceeded (403), Too Many Requests (429), and 5xx errors with
+    exponential backoff + jitter.
+    """
+    delay = 1.0
+    for attempt in range(max_retries):
+        try:
+            return call()
+        except HttpError as e:
+            status = getattr(e.resp, "status", None)
+            if status not in _RETRYABLE_STATUSES or attempt == max_retries - 1:
+                raise
+            sleep_for = delay + random.uniform(0, 0.5)
+            print(f"[retry] {status} on attempt {attempt + 1}/{max_retries}, sleeping {sleep_for:.1f}s",
+                  file=sys.stderr)
+            time.sleep(sleep_for)
+            delay = min(delay * 2, 32.0)
+    raise RuntimeError("unreachable")  # pragma: no cover
 
 
 def _parse_event_datetime(field: dict) -> datetime | None:
@@ -386,8 +416,11 @@ def wipe_month(svc, calendar_id: str, year: int, month: int) -> int:
             if not (target_month_first <= ev_local_naive <= target_month_last):
                 continue
             try:
-                svc.events().delete(calendarId=calendar_id, eventId=ev["id"]).execute()
+                _execute_with_retry(
+                    lambda: svc.events().delete(calendarId=calendar_id, eventId=ev["id"]).execute()
+                )
                 deleted += 1
+                time.sleep(0.1)  # stay well under per-second write quota
             except HttpError as e:
                 print(f"[warn] failed to delete {ev['id']}: {e}", file=sys.stderr)
         page_token = resp.get("nextPageToken")
@@ -405,8 +438,11 @@ def insert_events(svc, calendar_id: str, events: Iterable[PrayerEvent]) -> int:
             "end":   {"dateTime": ev.when_local.isoformat(timespec="seconds"), "timeZone": ev.tz},
             "transparency": "transparent",
         }
-        svc.events().insert(calendarId=calendar_id, body=body).execute()
+        _execute_with_retry(
+            lambda: svc.events().insert(calendarId=calendar_id, body=body).execute()
+        )
         inserted += 1
+        time.sleep(0.1)  # stay well under per-second write quota
     return inserted
 
 
